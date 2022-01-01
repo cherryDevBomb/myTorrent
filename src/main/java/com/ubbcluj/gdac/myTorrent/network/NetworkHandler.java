@@ -50,7 +50,7 @@ public class NetworkHandler {
         };
     }
 
-    public Protocol.Message sendRequestAndReceiveResponse(Protocol.Message message, String destinationHost, int destinationPort) {
+    public Protocol.Message sendRequestAndReceiveResponse(Protocol.Message message, String destinationHost, int destinationPort) throws IOException {
         log.info("Sent {} to {}", message.getType(), destinationPort);
         Protocol.Message response = null;
 
@@ -60,8 +60,6 @@ public class NetworkHandler {
         ) {
             sendMessage(dataOutputStream, message);
             response = receiveMessage(dataInputStream);
-        } catch (IOException e) {
-            e.printStackTrace();
         }
         return response;
     }

@@ -1,15 +1,16 @@
 package com.ubbcluj.gdac.myTorrent.processor;
 
+import com.google.protobuf.ByteString;
 import com.ubbcluj.gdac.myTorrent.communication.Protocol;
 import com.ubbcluj.gdac.myTorrent.model.File;
 import com.ubbcluj.gdac.myTorrent.network.NetworkHandler;
+import com.ubbcluj.gdac.myTorrent.util.FileInfoUtil;
+import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import java.util.stream.Collectors;
@@ -22,12 +23,14 @@ public class Node implements Runnable {
     private final Protocol.NodeId hubId;
 
     private final NetworkHandler networkHandler;
+    private final FileInfoUtil fileInfoUtil;
     private final Map<String, File> storedFiles;
 
     public Node(Protocol.NodeId nodeId, Protocol.NodeId hubId) {
         this.nodeId = nodeId;
         this.hubId = hubId;
         this.networkHandler = new NetworkHandler(nodeId.getHost(), nodeId.getPort(), this);
+        this.fileInfoUtil = new FileInfoUtil();
         this.storedFiles = new HashMap<>();
     }
 
@@ -87,6 +90,17 @@ public class Node implements Runnable {
                 Protocol.SearchResponse searchResponse = processSearchRequest(message.getSearchRequest());
                 response.setType(Protocol.Message.Type.SEARCH_RESPONSE);
                 response.setSearchResponse(searchResponse);
+                break;
+            case UPLOAD_REQUEST:
+                Protocol.UploadResponse uploadResponse = processUploadRequest(message.getUploadRequest());
+                response.setType(Protocol.Message.Type.UPLOAD_RESPONSE);
+                response.setUploadResponse(uploadResponse);
+                break;
+            case DOWNLOAD_REQUEST:
+                Protocol.DownloadResponse downloadResponse = processDownloadRequest(message.getDownloadRequest());
+                response.setType(Protocol.Message.Type.DOWNLOAD_RESPONSE);
+                response.setDownloadResponse(downloadResponse);
+                break;
         }
 
         return response.build();
@@ -121,7 +135,6 @@ public class Node implements Runnable {
 
     private Protocol.SearchResponse processSearchRequest(Protocol.SearchRequest searchRequest) {
         try {
-//            Pattern pattern = Pattern.compile(searchRequest.getRegex());
             // get peers using SubnetRequest
             Protocol.SubnetResponse subnetResponse = sendSubnetRequest(searchRequest.getSubnetId());
             List<Protocol.NodeId> peers = subnetResponse.getNodesList();
@@ -165,6 +178,64 @@ public class Node implements Runnable {
             return Protocol.SearchResponse.newBuilder()
                     .setStatus(Protocol.Status.PROCESSING_ERROR)
                     .setErrorMessage("Error processing SearchRequest")
+                    .build();
+        }
+    }
+
+    private Protocol.UploadResponse processUploadRequest(Protocol.UploadRequest uploadRequest) {
+        if (StringUtils.isEmpty(uploadRequest.getFilename())) {
+            return Protocol.UploadResponse.newBuilder()
+                    .setStatus(Protocol.Status.MESSAGE_ERROR)
+                    .setErrorMessage("The filename is empty")
+                    .build();
+        }
+
+        try {
+            if (!storedFiles.containsKey(uploadRequest.getFilename())) {
+                Protocol.FileInfo fileInfo = fileInfoUtil.getFileInfoFromUploadRequest(uploadRequest);
+                storedFiles.put(uploadRequest.getFilename(), new File(fileInfo, uploadRequest.getData().toByteArray()));
+            }
+
+            return Protocol.UploadResponse.newBuilder()
+                    .setStatus(Protocol.Status.SUCCESS)
+                    .setFileInfo(storedFiles.get(uploadRequest.getFilename()).getFileInfo())
+                    .build();
+        } catch (Exception e) {
+            return Protocol.UploadResponse.newBuilder()
+                    .setStatus(Protocol.Status.PROCESSING_ERROR)
+                    .setErrorMessage("Error processing UploadRequest")
+                    .build();
+        }
+    }
+
+    private Protocol.DownloadResponse processDownloadRequest(Protocol.DownloadRequest downloadRequest) {
+        if (downloadRequest.getFileHash().toByteArray().length != 16) {
+            return Protocol.DownloadResponse.newBuilder()
+                    .setStatus(Protocol.Status.MESSAGE_ERROR)
+                    .setErrorMessage("File hash has incorrect size")
+                    .build();
+        }
+
+        try {
+            Optional<File> storedFile = storedFiles.values().stream()
+                    .filter(f -> Arrays.equals(f.getFileInfo().getHash().toByteArray(), fileInfoUtil.getMD5(downloadRequest.getFileHash().toByteArray())))
+                    .findFirst();
+
+            if (storedFile.isPresent()) {
+                return Protocol.DownloadResponse.newBuilder()
+                        .setStatus(Protocol.Status.SUCCESS)
+                        .setData(ByteString.copyFrom(storedFile.get().getFileContent()))
+                        .build();
+            } else {
+                return Protocol.DownloadResponse.newBuilder()
+                        .setStatus(Protocol.Status.UNABLE_TO_COMPLETE)
+                        .setErrorMessage("File not found for download")
+                        .build();
+            }
+        } catch (Exception e) {
+            return Protocol.DownloadResponse.newBuilder()
+                    .setStatus(Protocol.Status.PROCESSING_ERROR)
+                    .setErrorMessage("Error processing DownloadRequest")
                     .build();
         }
     }

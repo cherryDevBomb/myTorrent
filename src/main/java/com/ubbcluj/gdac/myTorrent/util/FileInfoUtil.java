@@ -26,7 +26,7 @@ public class FileInfoUtil {
 
     public Optional<File> findFileByMD5Hash(Map<String, File> storedFiles, byte[] md5Hash) {
         return storedFiles.values().stream()
-                .filter(f -> Arrays.equals(f.getFileInfo().getHash().toByteArray(), getMD5(md5Hash)))
+                .filter(f -> Arrays.equals(f.getFileInfo().getHash().toByteArray(), md5Hash))
                 .findFirst();
     }
 
@@ -53,7 +53,7 @@ public class FileInfoUtil {
 
         List<Protocol.ChunkInfo> chunks = new ArrayList<>();
         for (int chunkIndex = 0; chunkIndex < numberOfChunks; chunkIndex++) {
-            byte[] chunkBytes = extractChunkFromFileContent(bytes, chunkIndex, numberOfChunks);
+            byte[] chunkBytes = extractChunkFromFileContent(bytes, chunkIndex);
             chunks.add(Protocol.ChunkInfo.newBuilder()
                     .setIndex(chunkIndex)
                     .setSize(chunkBytes.length)
@@ -73,7 +73,7 @@ public class FileInfoUtil {
                 .collect(Collectors.toList()));
     }
 
-    public byte[] extractChunkFromFileContent(byte[] byteContent, int chunkIndex, int totalNumberOfChunks) {
+    public byte[] extractChunkFromFileContent(byte[] byteContent, int chunkIndex) {
         int start = chunkIndex * CHUNK_SIZE;
         int end = Math.min(byteContent.length, (chunkIndex + 1) * CHUNK_SIZE);
 

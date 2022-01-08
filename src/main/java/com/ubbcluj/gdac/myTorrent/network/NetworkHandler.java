@@ -46,6 +46,12 @@ public class NetworkHandler {
                 sendMessage(dataOutputStream, response);
             } catch (IOException e) {
                 e.printStackTrace();
+            } finally {
+                try {
+                    socket.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
             }
         };
     }

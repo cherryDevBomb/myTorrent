@@ -385,7 +385,7 @@ public class Node implements Runnable {
         try {
             Optional<File> storedFile = fileInfoUtil.findFileByMD5Hash(storedFiles, chunkRequest.getFileHash().toByteArray());
             if (storedFile.isPresent()) {
-                byte[] chunkData = fileInfoUtil.extractChunkFromFileContent(storedFile.get().getFileContent(), chunkRequest.getChunkIndex(), storedFile.get().getFileInfo().getChunksList().size());
+                byte[] chunkData = fileInfoUtil.extractChunkFromFileContent(storedFile.get().getFileContent(), chunkRequest.getChunkIndex());
                 return Protocol.ChunkResponse.newBuilder()
                         .setStatus(Protocol.Status.SUCCESS)
                         .setData(ByteString.copyFrom(chunkData))

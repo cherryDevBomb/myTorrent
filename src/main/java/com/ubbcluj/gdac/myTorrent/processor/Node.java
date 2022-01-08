@@ -34,7 +34,7 @@ public class Node implements Runnable {
     public Node(Protocol.NodeId nodeId, Protocol.NodeId hubId) {
         this.nodeId = nodeId;
         this.hubId = hubId;
-        this.networkHandler = new NetworkHandler(nodeId.getHost(), nodeId.getPort(), this);
+        this.networkHandler = new NetworkHandler(nodeId.getPort(), this);
         this.fileInfoUtil = new FileInfoUtil();
         this.storedFiles = new HashMap<>();
     }

@@ -15,12 +15,10 @@ public class NetworkHandler {
 
     private static final Logger log = LoggerFactory.getLogger(NetworkHandler.class);
 
-    //    private String host;
-    private int port;
-    private Node node;
+    private final int port;
+    private final Node node;
 
-    public NetworkHandler(String host, int port, Node node) {
-//        this.host = host;
+    public NetworkHandler(int port, Node node) {
         this.port = port;
         this.node = node;
     }

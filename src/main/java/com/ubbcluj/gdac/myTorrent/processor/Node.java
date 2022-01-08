@@ -3,6 +3,7 @@ package com.ubbcluj.gdac.myTorrent.processor;
 import com.google.protobuf.ByteString;
 import com.ubbcluj.gdac.myTorrent.communication.Protocol;
 import com.ubbcluj.gdac.myTorrent.model.File;
+import com.ubbcluj.gdac.myTorrent.model.MessageErrorException;
 import com.ubbcluj.gdac.myTorrent.network.NetworkHandler;
 import com.ubbcluj.gdac.myTorrent.util.FileInfoUtil;
 import org.apache.commons.lang3.StringUtils;
@@ -11,6 +12,9 @@ import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import java.util.stream.Collectors;
@@ -101,6 +105,18 @@ public class Node implements Runnable {
                 response.setType(Protocol.Message.Type.DOWNLOAD_RESPONSE);
                 response.setDownloadResponse(downloadResponse);
                 break;
+            case REPLICATE_REQUEST:
+                Protocol.ReplicateResponse replicateResponse = processReplicateRequest(message.getReplicateRequest());
+                response.setType(Protocol.Message.Type.REPLICATE_RESPONSE);
+                response.setReplicateResponse(replicateResponse);
+                break;
+            case CHUNK_REQUEST:
+                Protocol.ChunkResponse chunkResponse = processChunkRequest(message.getChunkRequest());
+                response.setType(Protocol.Message.Type.CHUNK_RESPONSE);
+                response.setChunkResponse(chunkResponse);
+                break;
+            default:
+                log.error("Incorrect message type {}", message.getType());
         }
 
         return response.build();
@@ -217,10 +233,7 @@ public class Node implements Runnable {
         }
 
         try {
-            Optional<File> storedFile = storedFiles.values().stream()
-                    .filter(f -> Arrays.equals(f.getFileInfo().getHash().toByteArray(), fileInfoUtil.getMD5(downloadRequest.getFileHash().toByteArray())))
-                    .findFirst();
-
+            Optional<File> storedFile = fileInfoUtil.findFileByMD5Hash(storedFiles, downloadRequest.getFileHash().toByteArray());
             if (storedFile.isPresent()) {
                 return Protocol.DownloadResponse.newBuilder()
                         .setStatus(Protocol.Status.SUCCESS)
@@ -236,6 +249,156 @@ public class Node implements Runnable {
             return Protocol.DownloadResponse.newBuilder()
                     .setStatus(Protocol.Status.PROCESSING_ERROR)
                     .setErrorMessage("Error processing DownloadRequest")
+                    .build();
+        }
+    }
+
+    private Protocol.ReplicateResponse processReplicateRequest(Protocol.ReplicateRequest replicateRequest) {
+        if (StringUtils.isEmpty(replicateRequest.getFileInfo().getFilename())) {
+            return Protocol.ReplicateResponse.newBuilder()
+                    .setStatus(Protocol.Status.MESSAGE_ERROR)
+                    .setErrorMessage("The filename is empty")
+                    .build();
+        }
+
+        try {
+            // get peers using SubnetRequest
+            Protocol.SubnetResponse subnetResponse = sendSubnetRequest(replicateRequest.getSubnetId());
+            List<Protocol.NodeId> peers = subnetResponse.getNodesList();
+            peers.removeIf(peer -> nodeId.getHost().equals(peer.getHost()) && nodeId.getPort() == peer.getPort());
+
+            // get file chunks from other nodes
+            int numberOfChunks = replicateRequest.getFileInfo().getChunksList().size();
+            List<Protocol.ChunkRequest> chunkRequests = new ArrayList<>();
+            for (int chunkId = 0; chunkId < numberOfChunks; chunkId++) {
+                Protocol.ChunkRequest chunkRequest = Protocol.ChunkRequest.newBuilder()
+                        .setFileHash(replicateRequest.getFileInfo().getHash())
+                        .setChunkIndex(chunkId)
+                        .build();
+                chunkRequests.add(chunkRequest);
+            }
+
+            final Map<Integer, List<Protocol.NodeReplicationStatus>> replicationStatusesMap = new ConcurrentHashMap<>();
+            final Map<Integer, Protocol.ChunkResponse> foundChunks = new ConcurrentHashMap<>();
+            ExecutorService executor = Executors.newFixedThreadPool(50);
+            for (Protocol.ChunkRequest chunkRequest : chunkRequests) {
+                executor.submit(() -> {
+                    List<Protocol.NodeReplicationStatus> currentChunkStatuses = new ArrayList<>();
+                    Protocol.Status lastNodeStatus = null;
+                    int counter = 0;
+
+                    // send chunk request to nodes until the chunk is found or all nodes were queried
+                    while (lastNodeStatus != Protocol.Status.SUCCESS && counter++ < peers.size()) {
+                        int destinationPeerIndex = (chunkRequest.getChunkIndex() + counter) % peers.size();
+                        Protocol.NodeId destinationPeer = peers.get(destinationPeerIndex);
+
+                        // convert ChunkResponse to NodeReplicationStatus
+                        Protocol.ChunkResponse currentPeerResponse = null;
+                        Protocol.NodeReplicationStatus currentPeerStatus;
+                        try {
+                            currentPeerResponse = sendChunkRequest(destinationPeer, chunkRequest);
+                            currentPeerStatus = Protocol.NodeReplicationStatus.newBuilder()
+                                    .setNode(destinationPeer)
+                                    .setChunkIndex(chunkRequest.getChunkIndex())
+                                    .setStatus(currentPeerResponse.getStatus())
+                                    .build();
+                        } catch (MessageErrorException e) {
+                            currentPeerStatus = Protocol.NodeReplicationStatus.newBuilder()
+                                    .setNode(destinationPeer)
+                                    .setChunkIndex(chunkRequest.getChunkIndex())
+                                    .setStatus(Protocol.Status.MESSAGE_ERROR)
+                                    .setErrorMessage("Incorrect response type")
+                                    .build();
+                        } catch (IOException e) {
+                            currentPeerStatus = Protocol.NodeReplicationStatus.newBuilder()
+                                    .setNode(destinationPeer)
+                                    .setChunkIndex(chunkRequest.getChunkIndex())
+                                    .setStatus(Protocol.Status.NETWORK_ERROR)
+                                    .setErrorMessage("Could not connect to node")
+                                    .build();
+                        }
+
+                        currentChunkStatuses.add(currentPeerStatus);
+                        lastNodeStatus = currentPeerStatus.getStatus();
+
+                        // save ChunkResponse if it was found
+                        if (lastNodeStatus == Protocol.Status.SUCCESS && currentPeerResponse != null) {
+                            foundChunks.put(chunkRequest.getChunkIndex(), currentPeerResponse);
+                        }
+                    }
+                    replicationStatusesMap.put(chunkRequest.getChunkIndex(), currentChunkStatuses);
+                });
+            }
+
+            // compute the list of all statuses from all nodes
+            List<Protocol.NodeReplicationStatus> replicationStatusList = replicationStatusesMap.values().stream()
+                    .flatMap(Collection::stream)
+                    .collect(Collectors.toList());
+
+            // check if all chunks were found
+            boolean allChunksFound = replicationStatusesMap.values().stream()
+                    .map(chunkStatuses -> chunkStatuses.stream()
+                            .filter(status -> Protocol.Status.SUCCESS == status.getStatus())
+                            .findFirst())
+                    .allMatch(Optional::isPresent);
+
+            if (!allChunksFound) {
+                return Protocol.ReplicateResponse.newBuilder()
+                        .setStatus(Protocol.Status.UNABLE_TO_COMPLETE)
+                        .setErrorMessage("Missing chunks for ReplicateRequest")
+                        .addAllNodeStatusList(replicationStatusList)
+                        .build();
+            }
+
+            // replication success
+            byte[] replicatedFileContent = fileInfoUtil.buildFileFromChunks(foundChunks);
+            storedFiles.put(replicateRequest.getFileInfo().getFilename(), new File(replicateRequest.getFileInfo(), replicatedFileContent));
+
+            return Protocol.ReplicateResponse.newBuilder()
+                    .setStatus(Protocol.Status.SUCCESS)
+                    .addAllNodeStatusList(replicationStatusList)
+                    .build();
+
+        } catch (Exception e) {
+            return Protocol.ReplicateResponse.newBuilder()
+                    .setStatus(Protocol.Status.PROCESSING_ERROR)
+                    .setErrorMessage("Error processing ReplicateRequest")
+                    .build();
+        }
+    }
+
+    private Protocol.ChunkResponse processChunkRequest(Protocol.ChunkRequest chunkRequest) {
+        if (chunkRequest.getFileHash().toByteArray().length != 16) {
+            return Protocol.ChunkResponse.newBuilder()
+                    .setStatus(Protocol.Status.MESSAGE_ERROR)
+                    .setErrorMessage("File hash has incorrect size")
+                    .build();
+        }
+        if (chunkRequest.getChunkIndex() < 0) {
+            return Protocol.ChunkResponse.newBuilder()
+                    .setStatus(Protocol.Status.MESSAGE_ERROR)
+                    .setErrorMessage("ChunkIndex is less than zero")
+                    .build();
+        }
+
+        try {
+            Optional<File> storedFile = fileInfoUtil.findFileByMD5Hash(storedFiles, chunkRequest.getFileHash().toByteArray());
+            if (storedFile.isPresent()) {
+                byte[] chunkData = fileInfoUtil.extractChunkFromFileContent(storedFile.get().getFileContent(), chunkRequest.getChunkIndex(), storedFile.get().getFileInfo().getChunksList().size());
+                return Protocol.ChunkResponse.newBuilder()
+                        .setStatus(Protocol.Status.SUCCESS)
+                        .setData(ByteString.copyFrom(chunkData))
+                        .build();
+            } else {
+                return Protocol.ChunkResponse.newBuilder()
+                        .setStatus(Protocol.Status.UNABLE_TO_COMPLETE)
+                        .setErrorMessage("Chunk not found")
+                        .build();
+            }
+        } catch (Exception e) {
+            return Protocol.ChunkResponse.newBuilder()
+                    .setStatus(Protocol.Status.PROCESSING_ERROR)
+                    .setErrorMessage("Error processing ChunkRequest")
                     .build();
         }
     }
@@ -272,7 +435,7 @@ public class Node implements Runnable {
                 .build();
 
         try {
-            Protocol.Message response = networkHandler.sendRequestAndReceiveResponse(message, nodeId.getHost(), nodeId.getPort());
+            Protocol.Message response = networkHandler.sendRequestAndReceiveResponse(message, peerNode.getHost(), peerNode.getPort());
 
             if (!Protocol.Message.Type.LOCAL_SEARCH_RESPONSE.equals(response.getType())) {
                 return Protocol.NodeSearchResult.newBuilder()
@@ -294,6 +457,21 @@ public class Node implements Runnable {
                     .setErrorMessage("Could not connect to node")
                     .build();
         }
+    }
+
+    private Protocol.ChunkResponse sendChunkRequest(Protocol.NodeId peerNode, Protocol.ChunkRequest chunkRequest) throws MessageErrorException, IOException {
+        Protocol.Message message = Protocol.Message.newBuilder()
+                .setType(Protocol.Message.Type.CHUNK_REQUEST)
+                .setChunkRequest(chunkRequest)
+                .build();
+
+        Protocol.Message response = networkHandler.sendRequestAndReceiveResponse(message, peerNode.getHost(), peerNode.getPort());
+
+        if (!Protocol.Message.Type.CHUNK_RESPONSE.equals(response.getType())) {
+            throw new MessageErrorException("Incorrect response type for ChunkRequest");
+        }
+
+        return response.getChunkResponse();
     }
 
     private String getNodeName() {

@@ -1,13 +1,14 @@
 package com.ubbcluj.gdac.myTorrent.util;
 
+import com.google.common.primitives.Bytes;
 import com.google.protobuf.ByteString;
 import com.ubbcluj.gdac.myTorrent.communication.Protocol;
+import com.ubbcluj.gdac.myTorrent.model.File;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.List;
+import java.util.*;
+import java.util.stream.Collectors;
 
 public class FileInfoUtil {
 
@@ -21,6 +22,12 @@ public class FileInfoUtil {
         } catch (NoSuchAlgorithmException e) {
             e.printStackTrace();
         }
+    }
+
+    public Optional<File> findFileByMD5Hash(Map<String, File> storedFiles, byte[] md5Hash) {
+        return storedFiles.values().stream()
+                .filter(f -> Arrays.equals(f.getFileInfo().getHash().toByteArray(), getMD5(md5Hash)))
+                .findFirst();
     }
 
     public byte[] getMD5(byte[] bytes) {
@@ -45,17 +52,31 @@ public class FileInfoUtil {
         int numberOfChunks = (int) Math.ceil(bytes.length / CHUNK_SIZE);
 
         List<Protocol.ChunkInfo> chunks = new ArrayList<>();
-        for (int chunkId = 0; chunkId < numberOfChunks; chunkId++) {
-            int start = chunkId * numberOfChunks;
-            int end = Math.min(bytes.length, (chunkId + 1) * CHUNK_SIZE);
-            byte[] chunkBytes = Arrays.copyOfRange(bytes, start, end);
-
+        for (int chunkIndex = 0; chunkIndex < numberOfChunks; chunkIndex++) {
+            byte[] chunkBytes = extractChunkFromFileContent(bytes, chunkIndex, numberOfChunks);
             chunks.add(Protocol.ChunkInfo.newBuilder()
-                    .setIndex(chunkId)
+                    .setIndex(chunkIndex)
                     .setSize(chunkBytes.length)
                     .setHash(ByteString.copyFrom(getMD5(chunkBytes)))
                     .build());
         }
         return chunks;
+    }
+
+    public byte[] buildFileFromChunks(Map<Integer, Protocol.ChunkResponse> foundChunks) {
+        return Bytes.toArray(foundChunks.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(entry -> entry.getValue().getData())
+                .map(ByteString::toByteArray)
+                .map(Bytes::asList)
+                .flatMap(Collection::stream)
+                .collect(Collectors.toList()));
+    }
+
+    public byte[] extractChunkFromFileContent(byte[] byteContent, int chunkIndex, int totalNumberOfChunks) {
+        int start = chunkIndex * totalNumberOfChunks;
+        int end = Math.min(byteContent.length, (chunkIndex + 1) * CHUNK_SIZE);
+
+        return Arrays.copyOfRange(byteContent, start, end);
     }
 }

@@ -49,7 +49,7 @@ public class FileInfoUtil {
     }
 
     private List<Protocol.ChunkInfo> splitFileIntoChunks(byte[] bytes) {
-        int numberOfChunks = (int) Math.ceil(bytes.length / CHUNK_SIZE);
+        int numberOfChunks = (int) Math.ceil((double) bytes.length / CHUNK_SIZE);
 
         List<Protocol.ChunkInfo> chunks = new ArrayList<>();
         for (int chunkIndex = 0; chunkIndex < numberOfChunks; chunkIndex++) {
@@ -74,7 +74,7 @@ public class FileInfoUtil {
     }
 
     public byte[] extractChunkFromFileContent(byte[] byteContent, int chunkIndex, int totalNumberOfChunks) {
-        int start = chunkIndex * totalNumberOfChunks;
+        int start = chunkIndex * CHUNK_SIZE;
         int end = Math.min(byteContent.length, (chunkIndex + 1) * CHUNK_SIZE);
 
         return Arrays.copyOfRange(byteContent, start, end);

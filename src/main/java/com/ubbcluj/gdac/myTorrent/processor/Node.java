@@ -15,6 +15,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 import java.util.stream.Collectors;
@@ -152,9 +153,7 @@ public class Node implements Runnable {
     private Protocol.SearchResponse processSearchRequest(Protocol.SearchRequest searchRequest) {
         try {
             // get peers using SubnetRequest
-            Protocol.SubnetResponse subnetResponse = sendSubnetRequest(searchRequest.getSubnetId());
-            List<Protocol.NodeId> peers = subnetResponse.getNodesList();
-            peers.removeIf(peer -> nodeId.getHost().equals(peer.getHost()) && nodeId.getPort() == peer.getPort());
+            List<Protocol.NodeId> peers = getPeerNodes(searchRequest.getSubnetId());
 
             // get LocalSearchResponse from current node
             Protocol.LocalSearchRequest crtNodeLocalSearchRequest = Protocol.LocalSearchRequest.newBuilder()
@@ -263,9 +262,7 @@ public class Node implements Runnable {
 
         try {
             // get peers using SubnetRequest
-            Protocol.SubnetResponse subnetResponse = sendSubnetRequest(replicateRequest.getSubnetId());
-            List<Protocol.NodeId> peers = subnetResponse.getNodesList();
-            peers.removeIf(peer -> nodeId.getHost().equals(peer.getHost()) && nodeId.getPort() == peer.getPort());
+            List<Protocol.NodeId> peers = getPeerNodes(replicateRequest.getSubnetId());
 
             // get file chunks from other nodes
             int numberOfChunks = replicateRequest.getFileInfo().getChunksList().size();
@@ -329,6 +326,10 @@ public class Node implements Runnable {
                     replicationStatusesMap.put(chunkRequest.getChunkIndex(), currentChunkStatuses);
                 });
             }
+
+            // wait for executor to finish processing chunk requests
+            executor.shutdown();
+            executor.awaitTermination(Long.MAX_VALUE, TimeUnit.MILLISECONDS);
 
             // compute the list of all statuses from all nodes
             List<Protocol.NodeReplicationStatus> replicationStatusList = replicationStatusesMap.values().stream()
@@ -472,6 +473,13 @@ public class Node implements Runnable {
         }
 
         return response.getChunkResponse();
+    }
+
+    private List<Protocol.NodeId> getPeerNodes(int subnetId) {
+        Protocol.SubnetResponse subnetResponse = sendSubnetRequest(subnetId);
+        List<Protocol.NodeId> peers = new ArrayList<>(subnetResponse.getNodesList());
+        peers.removeIf(peer -> nodeId.getHost().equals(peer.getHost()) && nodeId.getPort() == peer.getPort());
+        return peers;
     }
 
     private String getNodeName() {

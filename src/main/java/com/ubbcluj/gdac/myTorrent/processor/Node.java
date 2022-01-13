@@ -36,7 +36,7 @@ public class Node implements Runnable {
         this.hubId = hubId;
         this.networkHandler = new NetworkHandler(nodeId.getPort(), this);
         this.fileInfoUtil = new FileInfoUtil();
-        this.storedFiles = new HashMap<>();
+        this.storedFiles = new ConcurrentHashMap<>();
     }
 
     @Override

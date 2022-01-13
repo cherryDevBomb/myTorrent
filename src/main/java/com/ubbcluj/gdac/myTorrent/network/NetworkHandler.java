@@ -73,6 +73,12 @@ public class NetworkHandler {
         byte[] byteBuffer = new byte[messageSize];
         int readMessageSize = dataInputStream.read(byteBuffer, 0, messageSize);
 
+        int lastReadSize = readMessageSize;
+        while (readMessageSize < messageSize) {
+            lastReadSize = dataInputStream.read(byteBuffer, lastReadSize, messageSize - readMessageSize);
+            readMessageSize += lastReadSize;
+        }
+
         if (messageSize != readMessageSize) {
             throw new RuntimeException("Network message has incorrect size: expected = " + messageSize + ", actual = " + readMessageSize);
         }
